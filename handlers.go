@@ -8,6 +8,12 @@ import (
 	r "github.com/dancannon/gorethink"
 )
 
+const (
+	ChannelStop = iota
+	UserStop
+	MessageStop
+)
+
 func addChannel(client *Client, data interface{}) {
 	var channel Channel
 	err := mapstructure.Decode(data, &channel)
@@ -27,22 +33,38 @@ func addChannel(client *Client, data interface{}) {
 }
 
 func subscribeChannel(client *Client, data interface{}) {
+	stop := client.NewStopChannel(ChannelStop)
+	result := make(chan r.ChangeResponse)
+
+	cursor, err := r.Table("channel").Changes(r.ChangesOpts{IncludeInitial: true}).Run(client.session)
+	if err != nil {
+		client.send <- Message{"error", err}
+		return
+	}
+
 	go func() {
-		cursor, err := r.Table("channel").Changes(r.ChangesOpts{IncludeInitial: true}).Run(client.session)
-
-		if err != nil {
-			client.send <- Message{"error", err}
-			return
-		}
 		var change r.ChangeResponse
-
 		for cursor.Next(&change) {
-			fmt.Println(change.NewValue)
-			if change.NewValue != nil {
-				client.send <- Message{"channel add", change.NewValue}
-				fmt.Println("sent channel add message")
+			result <- change
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-stop:
+				cursor.Close()
+				return
+			case change := <-result:
+				if change.NewValue != nil && change.OldValue == nil {
+					client.send <- Message{"channel add", change.NewValue}
+					fmt.Println("sent channel add message")
+				}
 			}
 		}
-
 	}()
+}
+
+func unsubscribeChannel(client *Client, data interface{}) {
+	client.StopForKey(ChannelStop)
 }
